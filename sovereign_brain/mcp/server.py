@@ -14,13 +14,16 @@ that Claude CLI executes using its own LLM capability (Teams subscription).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
+logger = logging.getLogger("sovereign_brain")
+
 import asyncpg
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from pydantic import Field
 
 from sovereign_brain.agents import architect, dev, reviewer, tester
@@ -76,6 +79,7 @@ def _new_uuid7() -> str:
 @mcp.tool()
 async def start_session(
     request: Annotated[str, Field(description="The feature request or task description")],
+    ctx: Context,
     project_context: Annotated[
         str,
         Field(description="Optional: current project architecture, tech stack, conventions"),
@@ -91,10 +95,10 @@ async def start_session(
     Returns an AgentInstruction. YOU must execute the system_prompt + user_message
     to produce the architecture plan, then call get_test_spec(plan) with the result.
     """
-    ctx = mcp.get_context()
-    pool: asyncpg.Pool = ctx.request_context.lifespan_context["pool"]
+    pool: asyncpg.Pool = ctx.lifespan_context["pool"]
 
     session_id = _new_uuid7()
+    logger.info("[architect] start_session | session=%s | request=%.120s", session_id, request)
 
     async with pool.acquire() as conn:
         await queries.create_session(conn, session_id, request)
@@ -126,6 +130,7 @@ async def get_test_spec(
         Field(description="The architecture plan produced by start_session (ArchitectOutput JSON)"),
     ],
     session_id: Annotated[str, Field(description="Session ID from start_session")],
+    ctx: Context,
     scenario: Annotated[
         str,
         Field(
@@ -147,8 +152,8 @@ async def get_test_spec(
     Pass the plan from start_session. Returns an AgentInstruction with a full
     system prompt + test specification. YOU must write the test file and confirm it fails.
     """
-    ctx = mcp.get_context()
-    pool: asyncpg.Pool = ctx.request_context.lifespan_context["pool"]
+    pool: asyncpg.Pool = ctx.lifespan_context["pool"]
+    logger.info("[tester] get_test_spec | session=%s | scenario=%.120s", session_id, scenario or "(auto)")
 
     if not scenario and plan.get("implementation_phases"):
         scenario = f"Implement: {plan['implementation_phases'][0]}"
@@ -186,6 +191,7 @@ async def implement_logic(
     test_code: Annotated[str, Field(description="The failing test code written by the Tester")],
     test_file_path: Annotated[str, Field(description="Path where the test file is saved")],
     session_id: Annotated[str, Field(description="Session ID from start_session")],
+    ctx: Context,
     error_output: Annotated[
         str,
         Field(description="Test runner error output (required on retry to give the Dev agent context)"),
@@ -202,8 +208,8 @@ async def implement_logic(
     After receiving the instruction, YOU must write the implementation file and run the tests.
     If tests still fail, call implement_logic again with error_output populated (up to 3 times).
     """
-    ctx = mcp.get_context()
-    pool: asyncpg.Pool = ctx.request_context.lifespan_context["pool"]
+    pool: asyncpg.Pool = ctx.lifespan_context["pool"]
+    logger.info("[dev] implement_logic | session=%s | test_file=%s | retry=%s", session_id, test_file_path, bool(error_output))
 
     async with pool.acquire() as conn:
         await queries.update_session_test_spec(
@@ -245,6 +251,7 @@ async def run_review(
         Field(description="Git diff (output of `git diff` or `git diff HEAD`) of the changes"),
     ],
     session_id: Annotated[str, Field(description="Session ID from start_session")],
+    ctx: Context,
     changed_files: Annotated[
         dict[str, str],
         Field(description="Map of file_path → full file content for all changed files"),
@@ -261,8 +268,8 @@ async def run_review(
     Returns an AgentInstruction. YOU must execute the review and return a ReviewerOutput.
     If approved=false, call start_session with review_feedback to begin a new iteration.
     """
-    ctx = mcp.get_context()
-    pool: asyncpg.Pool = ctx.request_context.lifespan_context["pool"]
+    pool: asyncpg.Pool = ctx.lifespan_context["pool"]
+    logger.info("[reviewer] run_review | session=%s | files=%s", session_id, list(changed_files.keys()))
 
     async with pool.acquire() as conn:
         await queries.append_context(
@@ -293,6 +300,7 @@ async def fetch_context(
         str,
         Field(description="Search query — keywords from past requests, plans, or implementations"),
     ],
+    ctx: Context,
     session_id: Annotated[
         str,
         Field(description="Optional: restrict search to a specific session"),
@@ -308,8 +316,8 @@ async def fetch_context(
     Returns matching sessions and context events to help with understanding
     past decisions, patterns, and prior implementations.
     """
-    ctx = mcp.get_context()
-    pool: asyncpg.Pool = ctx.request_context.lifespan_context["pool"]
+    pool: asyncpg.Pool = ctx.lifespan_context["pool"]
+    logger.info("[db] fetch_context | query=%.80s | session=%s", query, session_id or "*")
 
     async with pool.acquire() as conn:
         if session_id:
@@ -352,6 +360,11 @@ def _serialize(obj: Any) -> Any:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
     settings = Settings()
     mcp.run(transport="sse", host=settings.mcp_host, port=settings.mcp_port)
 
