@@ -76,6 +76,7 @@ class ReviewerInput(BaseModel):
     changed_files: dict[str, str] = {}
     project_context: str = ""
     plan: dict = {}
+    lint_results: dict = {}  # {"ruff": "...", "mypy": "...", "errors": bool}
 
 
 class ReviewerOutput(BaseModel):

@@ -14,7 +14,10 @@ that Claude CLI executes using its own LLM capability (Teams subscription).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -63,6 +66,38 @@ mcp = FastMCP(
     ),
     lifespan=lifespan,
 )
+
+
+async def _run_linters(changed_files: dict[str, str]) -> dict:
+    """Write changed_files to a temp dir, run ruff + mypy, return results."""
+    if not changed_files:
+        return {}
+
+    async def _exec(*cmd: str) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await proc.communicate()
+        return stdout.decode()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths: list[str] = []
+        for rel_path, content in changed_files.items():
+            abs_path = os.path.join(tmp, os.path.basename(rel_path))
+            with open(abs_path, "w") as f:
+                f.write(content)
+            paths.append(abs_path)
+
+        ruff = await _exec("uv", "run", "ruff", "check", "--output-format=concise", *paths)
+        mypy = await _exec(
+            "uv", "run", "mypy", "--ignore-missing-imports", "--no-error-summary", *paths
+        )
+
+    has_errors = bool(ruff.strip()) or "error:" in mypy
+    logger.info("[linters] ruff_clean=%s mypy_clean=%s", not ruff.strip(), "error:" not in mypy)
+    return {"ruff": ruff.strip(), "mypy": mypy.strip(), "errors": has_errors}
 
 
 def _new_uuid7() -> str:
@@ -271,6 +306,8 @@ async def run_review(
     pool: asyncpg.Pool = ctx.lifespan_context["pool"]
     logger.info("[reviewer] run_review | session=%s | files=%s", session_id, list(changed_files.keys()))
 
+    lint_results = await _run_linters(changed_files)
+
     async with pool.acquire() as conn:
         await queries.append_context(
             conn,
@@ -287,6 +324,7 @@ async def run_review(
             changed_files=changed_files,
             project_context=project_context,
             plan=plan,
+            lint_results=lint_results,
         ),
         session_id=session_id,
     )

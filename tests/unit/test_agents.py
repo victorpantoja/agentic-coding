@@ -208,3 +208,36 @@ class TestReviewerAgent:
             ReviewerInput(diff="+x", plan=PLAN), session_id=SESSION
         )
         assert "architecture_plan" in result.user_message
+
+    def test_lint_results_appear_in_message(self):
+        result = reviewer_build(
+            ReviewerInput(
+                diff="+x",
+                lint_results={"ruff": "src/foo.py:1:1: F401", "mypy": "", "errors": True},
+            ),
+            session_id=SESSION,
+        )
+        assert "F401" in result.user_message
+        assert "Linter Results" in result.user_message
+
+    def test_clean_lint_results_show_checkmark(self):
+        result = reviewer_build(
+            ReviewerInput(
+                diff="+x",
+                lint_results={"ruff": "", "mypy": "", "errors": False},
+            ),
+            session_id=SESSION,
+        )
+        assert "✓ clean" in result.user_message
+
+    def test_checklist_includes_ruff_and_mypy(self):
+        result = reviewer_build(ReviewerInput(diff="+x"), session_id=SESSION)
+        assert "ruff check passes" in result.user_message
+        assert "mypy passes" in result.user_message
+
+    def test_architect_action_required_mentions_session_id(self):
+        from sovereign_brain.agents.base import ArchitectInput
+        import sovereign_brain.agents.architect as _arch
+        result = _arch.build_instruction(ArchitectInput(request="x"), session_id=SESSION)
+        assert SESSION in result.action_required
+        assert "session_id" in result.action_required

@@ -29,6 +29,14 @@ Return a structured review with:
 - **DDD compliance**: Do entities use UUIDv7? Are bounded context boundaries respected?
 - **Vibe**: Does this code "feel right"? Is the style consistent? Does it fit naturally?
 
+## Linter Output
+
+Linter results are provided above under **Linter Results**. Interpret them as follows:
+- Any `ruff` output → list each line as an `issue` with severity `"error"`, set `approved=false`
+- `mypy` lines containing `error:` → list as `"error"`, set `approved=false`
+- `mypy` lines containing `warning:` or `note:` → list as `"warning"`, do not block approval
+- `✓ clean` means the tool reported no issues
+
 Approve if the code is good enough, even with minor suggestions. Only reject (approved=false) for:
 - Bugs or incorrect behavior
 - Security vulnerabilities

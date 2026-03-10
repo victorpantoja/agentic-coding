@@ -39,9 +39,14 @@ def build_instruction(input: ArchitectInput, session_id: str) -> AgentInstructio
         system_prompt=system_prompt,
         user_message=user_message,
         action_required=(
-            "Execute the Architect agent: analyze the feature request and produce a "
-            "structured architecture plan with DDD boundaries, UUIDv7 entities, and "
-            "ordered implementation phases. Return the plan as JSON matching ArchitectOutput."
+            "Execute the Architect agent using the system_prompt and user_message above. "
+            "Produce a structured architecture plan and return it as a JSON object matching "
+            "ArchitectOutput (keys: architecture_plan, components, bounded_contexts, "
+            "data_models, implementation_phases). "
+            "Then call get_test_spec with: "
+            "  plan=<that JSON object as a dict, NOT a string>, "
+            f" session_id='{session_id}' "
+            "(use exactly this session_id — it must not be omitted or changed)."
         ),
         session_id=session_id,
         step="plan",

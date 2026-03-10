@@ -33,9 +33,20 @@ def build_instruction(input: ReviewerInput, session_id: str) -> AgentInstruction
     if input.project_context:
         parts.append(f"## Project Context\n{input.project_context}")
 
+    if input.lint_results:
+        ruff_out = input.lint_results.get("ruff") or "✓ clean"
+        mypy_out = input.lint_results.get("mypy") or "✓ clean"
+        parts.append(
+            f"## Linter Results\n"
+            f"### ruff\n```\n{ruff_out}\n```\n"
+            f"### mypy\n```\n{mypy_out}\n```"
+        )
+
     parts.append(
         "## Review Checklist\n"
         "- [ ] All tests pass\n"
+        "- [ ] ruff check passes (no lint errors)\n"
+        "- [ ] mypy passes (no type errors)\n"
         "- [ ] Entity IDs use UUIDv7\n"
         "- [ ] DDD boundaries respected\n"
         "- [ ] No security vulnerabilities\n"
