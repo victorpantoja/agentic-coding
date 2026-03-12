@@ -479,7 +479,7 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
     settings = Settings()
-    mcp.run(transport="sse", host=settings.mcp_host, port=settings.mcp_port)
+    mcp.run(transport="http", host=settings.mcp_host, port=settings.mcp_port)
 
 
 if __name__ == "__main__":

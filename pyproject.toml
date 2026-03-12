@@ -5,7 +5,7 @@ description = "Sovereign Engineering Office — Local Multi-Agent Brain via Fast
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastmcp>=2.0",
+    "fastmcp>=3.0",
     "pydantic-ai[anthropic]>=0.0.14",
     "asyncpg>=0.30",
     "pydantic>=2.10",
