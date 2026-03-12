@@ -242,6 +242,23 @@ async def mark_step_finished(
     )
 
 
+async def mark_step_finished_by_name(
+    conn: asyncpg.Connection,
+    session_id: str,
+    step_name: str,
+) -> None:
+    """Mark a running step as finished by name. No-op if already finished (safe for retries)."""
+    await conn.execute(
+        """
+        UPDATE session_steps
+        SET status = 'finished', ended_at = now()
+        WHERE session_id = $1::uuid AND step_name = $2 AND status = 'running'
+        """,
+        session_id,
+        step_name,
+    )
+
+
 async def mark_step_failed(
     conn: asyncpg.Connection,
     step_id: str,

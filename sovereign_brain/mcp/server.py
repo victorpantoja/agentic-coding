@@ -160,7 +160,7 @@ async def start_session(
                 duration_ms=duration_ms,
                 step_id=step_id,
             )
-            await queries.mark_step_finished(conn, step_id)
+            # plan step closes when get_test_spec is called
         except Exception as exc:
             if step_id:
                 await queries.mark_step_failed(conn, step_id, str(exc))
@@ -223,6 +223,7 @@ async def get_test_spec(
     async with pool.acquire() as conn:
         await queries.update_session_plan(conn, session_id, plan)
         try:
+            await queries.mark_step_finished_by_name(conn, session_id, "plan")
             step_id = await queries.mark_step_running(conn, session_id, "test")
             duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
             await queries.append_context(
@@ -240,7 +241,7 @@ async def get_test_spec(
                 duration_ms=duration_ms,
                 step_id=step_id,
             )
-            await queries.mark_step_finished(conn, step_id)
+            # test step closes when implement_logic is called
         except Exception as exc:
             if step_id:
                 await queries.mark_step_failed(conn, step_id, str(exc))
@@ -294,6 +295,7 @@ async def implement_logic(
             {"test_code": test_code, "test_file_path": test_file_path},
         )
         try:
+            await queries.mark_step_finished_by_name(conn, session_id, "test")
             step_id = await queries.mark_step_running(conn, session_id, "implement")
             duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
             await queries.append_context(
@@ -313,7 +315,7 @@ async def implement_logic(
                 duration_ms=duration_ms,
                 step_id=step_id,
             )
-            await queries.mark_step_finished(conn, step_id)
+            # implement step closes when run_review is called
         except Exception as exc:
             if step_id:
                 await queries.mark_step_failed(conn, step_id, str(exc))
@@ -366,6 +368,7 @@ async def run_review(
 
     async with pool.acquire() as conn:
         try:
+            await queries.mark_step_finished_by_name(conn, session_id, "implement")
             step_id = await queries.mark_step_running(conn, session_id, "review")
             duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
             await queries.append_context(
