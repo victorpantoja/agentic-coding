@@ -125,17 +125,24 @@ async def append_context(
     event_type: str,
     data: dict,
     summary: str = "",
+    agent: str | None = None,
+    duration_ms: int | None = None,
+    step_id: str | None = None,
 ) -> None:
     await conn.execute(
         """
-        INSERT INTO context_history (id, session_id, event_type, data, summary)
-        VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5)
+        INSERT INTO context_history
+            (id, session_id, event_type, data, summary, agent, duration_ms, step_id)
+        VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5, $6, $7, $8::uuid)
         """,
         context_id,
         session_id,
         event_type,
         json.dumps(data),
         summary,
+        agent,
+        duration_ms,
+        step_id,
     )
 
 
@@ -169,10 +176,104 @@ async def get_session_context(
     """Get all context events for a specific session."""
     rows = await conn.fetch(
         """
-        SELECT id, event_type, data, summary, created_at
+        SELECT id, event_type, data, summary, agent, duration_ms, step_id, created_at
         FROM context_history
         WHERE session_id = $1::uuid
         ORDER BY created_at ASC
+        """,
+        session_id,
+    )
+    return [dict(r) for r in rows]
+
+
+# ── Session steps ─────────────────────────────────────────────────────────────
+
+async def create_session_steps(
+    conn: asyncpg.Connection,
+    session_id: str,
+    step_ids: dict[str, str],
+) -> None:
+    """Insert all 4 steps as pending. Called immediately after create_session."""
+    await conn.executemany(
+        """
+        INSERT INTO session_steps (id, session_id, step_name, status, scheduled_at)
+        VALUES ($1::uuid, $2::uuid, $3, 'pending', now())
+        """,
+        [
+            (step_ids["plan"],      session_id, "plan"),
+            (step_ids["test"],      session_id, "test"),
+            (step_ids["implement"], session_id, "implement"),
+            (step_ids["review"],    session_id, "review"),
+        ],
+    )
+
+
+async def mark_step_running(
+    conn: asyncpg.Connection,
+    session_id: str,
+    step_name: str,
+) -> str | None:
+    """Set step to running, record started_at. Returns the step UUID or None if not found."""
+    row = await conn.fetchrow(
+        """
+        UPDATE session_steps
+        SET status = 'running', started_at = now()
+        WHERE session_id = $1::uuid AND step_name = $2
+          AND status IN ('pending', 'running', 'failed')
+        RETURNING id
+        """,
+        session_id,
+        step_name,
+    )
+    return str(row["id"]) if row else None
+
+
+async def mark_step_finished(
+    conn: asyncpg.Connection,
+    step_id: str,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE session_steps
+        SET status = 'finished', ended_at = now()
+        WHERE id = $1::uuid
+        """,
+        step_id,
+    )
+
+
+async def mark_step_failed(
+    conn: asyncpg.Connection,
+    step_id: str,
+    error_details: str,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE session_steps
+        SET status = 'failed', ended_at = now(), error_details = $2
+        WHERE id = $1::uuid
+        """,
+        step_id,
+        error_details,
+    )
+
+
+async def get_session_steps(
+    conn: asyncpg.Connection,
+    session_id: str,
+) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT id, step_name, status, scheduled_at, started_at, ended_at, error_details
+        FROM session_steps
+        WHERE session_id = $1::uuid
+        ORDER BY
+            CASE step_name
+                WHEN 'plan'      THEN 1
+                WHEN 'test'      THEN 2
+                WHEN 'implement' THEN 3
+                WHEN 'review'    THEN 4
+            END
         """,
         session_id,
     )

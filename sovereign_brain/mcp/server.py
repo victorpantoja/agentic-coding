@@ -133,18 +133,38 @@ async def start_session(
     pool: asyncpg.Pool = ctx.lifespan_context["pool"]
 
     session_id = _new_uuid7()
+    step_ids = {
+        "plan":      _new_uuid7(),
+        "test":      _new_uuid7(),
+        "implement": _new_uuid7(),
+        "review":    _new_uuid7(),
+    }
     logger.info("[architect] start_session | session=%s | request=%.120s", session_id, request)
+    start_time = asyncio.get_event_loop().time()
+    step_id: str | None = None
 
     async with pool.acquire() as conn:
         await queries.create_session(conn, session_id, request)
-        await queries.append_context(
-            conn,
-            _new_uuid7(),
-            session_id,
-            "plan",
-            {"request": request, "project_context": project_context},
-            summary=f"Session started: {request[:200]}",
-        )
+        await queries.create_session_steps(conn, session_id, step_ids)
+        try:
+            step_id = await queries.mark_step_running(conn, session_id, "plan")
+            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            await queries.append_context(
+                conn,
+                _new_uuid7(),
+                session_id,
+                "plan",
+                {"request": request, "project_context": project_context},
+                summary=f"Session started: {request[:200]}",
+                agent="architect",
+                duration_ms=duration_ms,
+                step_id=step_id,
+            )
+            await queries.mark_step_finished(conn, step_id)
+        except Exception as exc:
+            if step_id:
+                await queries.mark_step_failed(conn, step_id, str(exc))
+            raise
 
     return architect.build_instruction(
         architect.ArchitectInput(
@@ -197,16 +217,34 @@ async def get_test_spec(
         name = first.get("name", "primary component") if isinstance(first, dict) else str(first)
         scenario = f"Implement core behaviour of {name}"
 
+    start_time = asyncio.get_event_loop().time()
+    step_id: str | None = None
+
     async with pool.acquire() as conn:
         await queries.update_session_plan(conn, session_id, plan)
-        await queries.append_context(
-            conn,
-            _new_uuid7(),
-            session_id,
-            "test",
-            {"scenario": scenario, "plan_summary": plan.get("architecture_plan", "")[:500]},
-            summary=f"Tester: {scenario[:200]}",
-        )
+        try:
+            step_id = await queries.mark_step_running(conn, session_id, "test")
+            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            await queries.append_context(
+                conn,
+                _new_uuid7(),
+                session_id,
+                "test",
+                {
+                    "scenario": scenario,
+                    "plan_summary": plan.get("architecture_plan", "")[:500],
+                    "existing_code_files": list(existing_code.keys()),
+                },
+                summary=f"Tester: {scenario[:200]}",
+                agent="tester",
+                duration_ms=duration_ms,
+                step_id=step_id,
+            )
+            await queries.mark_step_finished(conn, step_id)
+        except Exception as exc:
+            if step_id:
+                await queries.mark_step_failed(conn, step_id, str(exc))
+            raise
 
     return tester.build_instruction(
         tester.TesterInput(
@@ -246,24 +284,40 @@ async def implement_logic(
     pool: asyncpg.Pool = ctx.lifespan_context["pool"]
     logger.info("[dev] implement_logic | session=%s | test_file=%s | retry=%s", session_id, test_file_path, bool(error_output))
 
+    start_time = asyncio.get_event_loop().time()
+    step_id: str | None = None
+
     async with pool.acquire() as conn:
         await queries.update_session_test_spec(
             conn,
             session_id,
             {"test_code": test_code, "test_file_path": test_file_path},
         )
-        await queries.append_context(
-            conn,
-            _new_uuid7(),
-            session_id,
-            "implement",
-            {
-                "test_file_path": test_file_path,
-                "has_error": bool(error_output),
-                "error_preview": error_output[:300] if error_output else "",
-            },
-            summary=f"Dev: implement for {test_file_path}" + (" (retry)" if error_output else ""),
-        )
+        try:
+            step_id = await queries.mark_step_running(conn, session_id, "implement")
+            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            await queries.append_context(
+                conn,
+                _new_uuid7(),
+                session_id,
+                "implement",
+                {
+                    "test_file_path": test_file_path,
+                    "has_error": bool(error_output),
+                    "error_preview": error_output[:300] if error_output else "",
+                    "existing_code_files": list(existing_code.keys()),
+                    "is_retry": bool(error_output),
+                },
+                summary=f"Dev: implement for {test_file_path}" + (" (retry)" if error_output else ""),
+                agent="dev",
+                duration_ms=duration_ms,
+                step_id=step_id,
+            )
+            await queries.mark_step_finished(conn, step_id)
+        except Exception as exc:
+            if step_id:
+                await queries.mark_step_failed(conn, step_id, str(exc))
+            raise
 
     return dev.build_instruction(
         dev.DevInput(
@@ -306,17 +360,36 @@ async def run_review(
     pool: asyncpg.Pool = ctx.lifespan_context["pool"]
     logger.info("[reviewer] run_review | session=%s | files=%s", session_id, list(changed_files.keys()))
 
+    start_time = asyncio.get_event_loop().time()
     lint_results = await _run_linters(changed_files)
+    step_id: str | None = None
 
     async with pool.acquire() as conn:
-        await queries.append_context(
-            conn,
-            _new_uuid7(),
-            session_id,
-            "review",
-            {"diff_preview": diff[:500], "changed_files": list(changed_files.keys())},
-            summary=f"Reviewer: {len(changed_files)} files changed",
-        )
+        try:
+            step_id = await queries.mark_step_running(conn, session_id, "review")
+            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
+            await queries.append_context(
+                conn,
+                _new_uuid7(),
+                session_id,
+                "review",
+                {
+                    "diff_preview": diff[:500],
+                    "changed_files": list(changed_files.keys()),
+                    "lint_errors": lint_results.get("errors", False),
+                    "ruff_output": lint_results.get("ruff", "")[:300],
+                    "mypy_output": lint_results.get("mypy", "")[:300],
+                },
+                summary=f"Reviewer: {len(changed_files)} files changed",
+                agent="reviewer",
+                duration_ms=duration_ms,
+                step_id=step_id,
+            )
+            await queries.mark_step_finished(conn, step_id)
+        except Exception as exc:
+            if step_id:
+                await queries.mark_step_failed(conn, step_id, str(exc))
+            raise
 
     return reviewer.build_instruction(
         reviewer.ReviewerInput(
@@ -361,8 +434,10 @@ async def fetch_context(
         if session_id:
             events = await queries.get_session_context(conn, session_id)
             session = await queries.get_session(conn, session_id)
+            steps = await queries.get_session_steps(conn, session_id)
             return {
                 "session": _serialize(session),
+                "steps": [_serialize(s) for s in steps],
                 "events": [_serialize(e) for e in events],
                 "total": len(events),
             }
