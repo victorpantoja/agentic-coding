@@ -1,6 +1,5 @@
 """Unit tests for the four agent instruction builders."""
 
-import pytest
 
 import sovereign_brain.agents.architect as _architect_mod
 import sovereign_brain.agents.dev as _dev_mod
@@ -236,8 +235,8 @@ class TestReviewerAgent:
         assert "mypy passes" in result.user_message
 
     def test_architect_action_required_mentions_session_id(self):
-        from sovereign_brain.agents.base import ArchitectInput
         import sovereign_brain.agents.architect as _arch
+        from sovereign_brain.agents.base import ArchitectInput
         result = _arch.build_instruction(ArchitectInput(request="x"), session_id=SESSION)
         assert SESSION in result.action_required
         assert "session_id" in result.action_required

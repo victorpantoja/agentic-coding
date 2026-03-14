@@ -1,7 +1,7 @@
 """Async PostgreSQL connection management via SQLAlchemy + asyncpg."""
 
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
@@ -19,7 +19,7 @@ def create_engine(settings: Settings) -> AsyncEngine:
 
 
 @asynccontextmanager
-async def get_connection(engine: AsyncEngine) -> AsyncGenerator[AsyncConnection, None]:
+async def get_connection(engine: AsyncEngine) -> AsyncGenerator[AsyncConnection]:
     """Yield a single async connection from the engine pool."""
     async with engine.connect() as conn:
         yield conn
