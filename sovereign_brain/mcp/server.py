@@ -1,41 +1,54 @@
 """
-Sovereign Brain — FastMCP Server
-=================================
-Exposes 5 tools to Claude CLI:
-  1. start_session    — Architect generates a structural plan
-  2. get_test_spec    — Tester generates failing-test spec
-  3. implement_logic  — Dev agent generates implementation guide
-  4. run_review       — Reviewer performs final quality gate
-  5. fetch_context    — Query PostgreSQL for historical context
+Sovereign Brain — FastMCP Server (High-Autonomy Orchestrator)
+=============================================================
+Exposes four tools to Claude CLI:
 
-No external API calls are made.  Each tool returns an AgentInstruction
-that Claude CLI executes using its own LLM capability (Teams subscription).
+  1. execute_autonomous_task  — Start the full Architect→Tester→Dev→Reviewer pipeline.
+                                Returns the first PhaseInstruction (Architect phase).
+
+  2. advance_task             — Submit the result of the current phase and receive the next
+                                PhaseInstruction. Repeat until is_terminal=True.
+
+  3. get_current_status       — Recovery tool: returns current phase + lessons learned so an
+                                interrupted autonomous loop can be resumed without data loss.
+
+  4. fetch_context            — Query PostgreSQL for historical sessions and context.
+
+Architecture (keyless):
+  - The Python server handles state, phase transitions, and DB persistence.
+  - Claude CLI handles ALL intelligence using the Teams subscription.
+  - No ANTHROPIC_API_KEY required — zero in-server LLM calls.
+
+Autonomous loop pattern:
+  execute_autonomous_task(request)
+    → PhaseInstruction(current_phase="plan")
+    → [Claude executes, produces ArchitectOutput JSON]
+    → advance_task(session_id, "plan", architect_output)
+    → PhaseInstruction(current_phase="test")
+    → ... repeat ...
+    → PhaseInstruction(current_phase="complete", is_terminal=True)
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-import tempfile
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
-
-logger = logging.getLogger("sovereign_brain")
 
 import asyncpg
 from fastmcp import Context, FastMCP
 from pydantic import Field
 
-from sovereign_brain.agents import architect, dev, reviewer, tester
-from sovereign_brain.agents.base import AgentInstruction
+from sovereign_brain.agents import orchestrator
+from sovereign_brain.agents.base import PhaseInstruction
 from sovereign_brain.config import Settings
 from sovereign_brain.db import queries
 
+logger = logging.getLogger("sovereign_brain")
 
-# ── App lifespan ─────────────────────────────────────────────────────────────
+
+# ── App lifespan ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
@@ -47,366 +60,114 @@ async def lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
         await pool.close()
 
 
-# ── Server setup ─────────────────────────────────────────────────────────────
+# ── Server setup ──────────────────────────────────────────────────────────────
 
 mcp = FastMCP(
     name="sovereign-brain",
     instructions=(
-        "Sovereign Engineering Office — Local Multi-Agent Brain.\n\n"
-        "This server orchestrates four specialized agents (Architect, Tester, Dev, Reviewer) "
-        "following the Canon TDD workflow. Each tool returns a structured AgentInstruction "
-        "that YOU (Claude CLI) must execute using your own reasoning and the provided system prompt.\n\n"
-        "Typical flow:\n"
-        "  1. start_session(request)       → Architect produces a plan\n"
-        "  2. get_test_spec(plan)          → Tester writes failing tests\n"
-        "  3. implement_logic(test_result) → Dev implements minimal code\n"
-        "  4. run_review(diff)             → Reviewer approves or requests changes\n"
-        "  5. fetch_context(query)         → Look up historical sessions\n\n"
-        "If the Reviewer rejects, call start_session again with review_feedback to iterate."
+        "Sovereign Engineering Office — High-Autonomy Orchestrator.\n\n"
+        "ARCHITECTURE (keyless): This server drives a state machine. You supply the intelligence.\n"
+        "No API key required — all reasoning is performed by you (Claude CLI / Teams).\n\n"
+        "AUTONOMOUS LOOP:\n"
+        "  1. Call execute_autonomous_task(request)\n"
+        "     → Returns PhaseInstruction(current_phase='plan')\n"
+        "  2. Execute the instruction using your own reasoning.\n"
+        "     Produce a JSON result matching output_schema.\n"
+        "  3. Call advance_task(session_id, completed_phase, result)\n"
+        "     → Returns the next PhaseInstruction\n"
+        "  4. Repeat until is_terminal=True (current_phase='complete' or 'failed').\n\n"
+        "REVIEWER SUB-AGENTS:\n"
+        "  review_lint  → Act as LintAgent: run `uv run ruff check .` + mypy via Bash.\n"
+        "  review_arch  → Act as ArchitectureAgent: check SOLID/DDD/UUIDv7.\n"
+        "  review_final → Act as ManagerReviewer: apply Hard Gate + vibe check.\n\n"
+        "RECOVERY:\n"
+        "  If the loop is interrupted, call get_current_status(session_id) to resume.\n\n"
+        "SILENCE IS PROGRESS: only interrupt the user when current_phase is 'complete' or 'failed'."
     ),
     lifespan=lifespan,
 )
 
 
-async def _run_linters(changed_files: dict[str, str]) -> dict:
-    """Write changed_files to a temp dir, run ruff + mypy, return results."""
-    if not changed_files:
-        return {}
-
-    async def _exec(*cmd: str) -> str:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await proc.communicate()
-        return stdout.decode()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        paths: list[str] = []
-        for rel_path, content in changed_files.items():
-            abs_path = os.path.join(tmp, os.path.basename(rel_path))
-            with open(abs_path, "w") as f:
-                f.write(content)
-            paths.append(abs_path)
-
-        ruff = await _exec("uv", "run", "ruff", "check", "--output-format=concise", *paths)
-        mypy = await _exec(
-            "uv", "run", "mypy", "--ignore-missing-imports", "--no-error-summary", *paths
-        )
-
-    has_errors = bool(ruff.strip()) or "error:" in mypy
-    logger.info("[linters] ruff_clean=%s mypy_clean=%s", not ruff.strip(), "error:" not in mypy)
-    return {"ruff": ruff.strip(), "mypy": mypy.strip(), "errors": has_errors}
-
-
-def _new_uuid7() -> str:
-    """Generate a UUID7 (time-ordered). Falls back to UUID4 if uuid7 package absent."""
-    try:
-        from uuid7 import uuid7
-        return str(uuid7())
-    except ImportError:
-        return str(uuid.uuid4())
-
-
-# ── Tool 1: start_session ────────────────────────────────────────────────────
+# ── Tool 1: execute_autonomous_task ───────────────────────────────────────────
 
 @mcp.tool()
-async def start_session(
-    request: Annotated[str, Field(description="The feature request or task description")],
+async def execute_autonomous_task(
+    request: Annotated[str, Field(description="Feature request or task description")],
     ctx: Context,
     project_context: Annotated[
         str,
-        Field(description="Optional: current project architecture, tech stack, conventions"),
+        Field(description="Current project architecture, tech stack, and conventions"),
     ] = "",
-    review_feedback: Annotated[
-        str,
-        Field(description="Optional: Reviewer feedback from a previous rejected session (for iteration)"),
-    ] = "",
-) -> AgentInstruction:
+) -> PhaseInstruction:
     """
-    Trigger the Architect agent to analyse the request and produce a structural plan.
+    Start the autonomous TDD pipeline.
 
-    Returns an AgentInstruction. YOU must execute the system_prompt + user_message
-    to produce the architecture plan, then call get_test_spec(plan) with the result.
+    Creates a new session and returns the first PhaseInstruction (Architect phase).
+    YOU must execute the instruction, produce a result matching output_schema, then
+    call advance_task(). Repeat until is_terminal=True. Do not interrupt the user between phases.
     """
     pool: asyncpg.Pool = ctx.lifespan_context["pool"]
-
-    session_id = _new_uuid7()
-    step_ids = {
-        "plan":      _new_uuid7(),
-        "test":      _new_uuid7(),
-        "implement": _new_uuid7(),
-        "review":    _new_uuid7(),
-    }
-    logger.info("[architect] start_session | session=%s | request=%.120s", session_id, request)
-    start_time = asyncio.get_event_loop().time()
-    step_id: str | None = None
-
-    async with pool.acquire() as conn:
-        await queries.create_session(conn, session_id, request)
-        await queries.create_session_steps(conn, session_id, step_ids)
-        try:
-            step_id = await queries.mark_step_running(conn, session_id, "plan")
-            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
-            await queries.append_context(
-                conn,
-                _new_uuid7(),
-                session_id,
-                "plan",
-                {"request": request, "project_context": project_context},
-                summary=f"Session started: {request[:200]}",
-                agent="architect",
-                duration_ms=duration_ms,
-                step_id=step_id,
-            )
-            # plan step closes when get_test_spec is called
-        except Exception as exc:
-            if step_id:
-                await queries.mark_step_failed(conn, step_id, str(exc))
-            raise
-
-    return architect.build_instruction(
-        architect.ArchitectInput(
-            request=request,
-            project_context=project_context,
-            review_feedback=review_feedback,
-        ),
-        session_id=session_id,
-    )
+    logger.info("[server] execute_autonomous_task | request=%.80s", request)
+    return await orchestrator.start(request, project_context, pool)
 
 
-# ── Tool 2: get_test_spec ────────────────────────────────────────────────────
+# ── Tool 2: advance_task ──────────────────────────────────────────────────────
 
 @mcp.tool()
-async def get_test_spec(
-    plan: Annotated[
-        dict,
-        Field(description="The architecture plan produced by start_session (ArchitectOutput JSON)"),
-    ],
-    session_id: Annotated[str, Field(description="Session ID from start_session")],
-    ctx: Context,
-    scenario: Annotated[
+async def advance_task(
+    session_id: Annotated[str, Field(description="Session ID from execute_autonomous_task")],
+    completed_phase: Annotated[
         str,
         Field(
             description=(
-                "Specific test scenario to focus on. "
-                "Leave empty to derive automatically from the plan."
-            ),
-        ),
-    ] = "",
-    existing_code: Annotated[
-        dict[str, str],
-        Field(description="Map of file_path → code for any existing relevant files"),
-    ] = {},
-    project_context: Annotated[str, Field(description="Project context")] = "",
-) -> AgentInstruction:
-    """
-    Trigger the Tester agent to write a failing test (Red phase of Canon TDD).
-
-    Pass the plan from start_session. Returns an AgentInstruction with a full
-    system prompt + test specification. YOU must write the test file and confirm it fails.
-    """
-    pool: asyncpg.Pool = ctx.lifespan_context["pool"]
-    logger.info("[tester] get_test_spec | session=%s | scenario=%.120s", session_id, scenario or "(auto)")
-
-    if not scenario and plan.get("implementation_phases"):
-        scenario = f"Implement: {plan['implementation_phases'][0]}"
-    elif not scenario and plan.get("components"):
-        first = plan["components"][0]
-        name = first.get("name", "primary component") if isinstance(first, dict) else str(first)
-        scenario = f"Implement core behaviour of {name}"
-
-    start_time = asyncio.get_event_loop().time()
-    step_id: str | None = None
-
-    async with pool.acquire() as conn:
-        await queries.update_session_plan(conn, session_id, plan)
-        try:
-            await queries.mark_step_finished_by_name(conn, session_id, "plan")
-            step_id = await queries.mark_step_running(conn, session_id, "test")
-            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
-            await queries.append_context(
-                conn,
-                _new_uuid7(),
-                session_id,
-                "test",
-                {
-                    "scenario": scenario,
-                    "plan_summary": plan.get("architecture_plan", "")[:500],
-                    "existing_code_files": list(existing_code.keys()),
-                },
-                summary=f"Tester: {scenario[:200]}",
-                agent="tester",
-                duration_ms=duration_ms,
-                step_id=step_id,
+                "The phase you just completed: "
+                "'plan' | 'test' | 'implement' | 'review_lint' | 'review_arch' | 'review_final'"
             )
-            # test step closes when implement_logic is called
-        except Exception as exc:
-            if step_id:
-                await queries.mark_step_failed(conn, step_id, str(exc))
-            raise
-
-    return tester.build_instruction(
-        tester.TesterInput(
-            plan=plan,
-            scenario=scenario,
-            existing_code=existing_code,
-            project_context=project_context,
         ),
-        session_id=session_id,
-    )
-
-
-# ── Tool 3: implement_logic ──────────────────────────────────────────────────
-
-@mcp.tool()
-async def implement_logic(
-    test_code: Annotated[str, Field(description="The failing test code written by the Tester")],
-    test_file_path: Annotated[str, Field(description="Path where the test file is saved")],
-    session_id: Annotated[str, Field(description="Session ID from start_session")],
-    ctx: Context,
-    error_output: Annotated[
-        str,
-        Field(description="Test runner error output (required on retry to give the Dev agent context)"),
-    ] = "",
-    existing_code: Annotated[
-        dict[str, str],
-        Field(description="Map of file_path → existing code"),
-    ] = {},
-    project_context: Annotated[str, Field(description="Project context")] = "",
-) -> AgentInstruction:
-    """
-    Trigger the Dev agent to write the minimum code to make the failing test pass (Green phase).
-
-    After receiving the instruction, YOU must write the implementation file and run the tests.
-    If tests still fail, call implement_logic again with error_output populated (up to 3 times).
-    """
-    pool: asyncpg.Pool = ctx.lifespan_context["pool"]
-    logger.info("[dev] implement_logic | session=%s | test_file=%s | retry=%s", session_id, test_file_path, bool(error_output))
-
-    start_time = asyncio.get_event_loop().time()
-    step_id: str | None = None
-
-    async with pool.acquire() as conn:
-        await queries.update_session_test_spec(
-            conn,
-            session_id,
-            {"test_code": test_code, "test_file_path": test_file_path},
-        )
-        try:
-            await queries.mark_step_finished_by_name(conn, session_id, "test")
-            step_id = await queries.mark_step_running(conn, session_id, "implement")
-            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
-            await queries.append_context(
-                conn,
-                _new_uuid7(),
-                session_id,
-                "implement",
-                {
-                    "test_file_path": test_file_path,
-                    "has_error": bool(error_output),
-                    "error_preview": error_output[:300] if error_output else "",
-                    "existing_code_files": list(existing_code.keys()),
-                    "is_retry": bool(error_output),
-                },
-                summary=f"Dev: implement for {test_file_path}" + (" (retry)" if error_output else ""),
-                agent="dev",
-                duration_ms=duration_ms,
-                step_id=step_id,
-            )
-            # implement step closes when run_review is called
-        except Exception as exc:
-            if step_id:
-                await queries.mark_step_failed(conn, step_id, str(exc))
-            raise
-
-    return dev.build_instruction(
-        dev.DevInput(
-            test_code=test_code,
-            test_file_path=test_file_path,
-            error_output=error_output,
-            existing_code=existing_code,
-            project_context=project_context,
-        ),
-        session_id=session_id,
-    )
-
-
-# ── Tool 4: run_review ───────────────────────────────────────────────────────
-
-@mcp.tool()
-async def run_review(
-    diff: Annotated[
-        str,
-        Field(description="Git diff (output of `git diff` or `git diff HEAD`) of the changes"),
     ],
-    session_id: Annotated[str, Field(description="Session ID from start_session")],
-    ctx: Context,
-    changed_files: Annotated[
-        dict[str, str],
-        Field(description="Map of file_path → full file content for all changed files"),
-    ] = {},
-    plan: Annotated[
+    result: Annotated[
         dict,
-        Field(description="Original architecture plan for compliance check"),
-    ] = {},
-    project_context: Annotated[str, Field(description="Project context")] = "",
-) -> AgentInstruction:
+        Field(description="Structured JSON output from executing the last PhaseInstruction"),
+    ],
+    ctx: Context,
+) -> PhaseInstruction:
     """
-    Trigger the Reviewer agent for the final quality gate and vibe compliance check.
+    Submit the result of the current phase and receive the next PhaseInstruction.
 
-    Returns an AgentInstruction. YOU must execute the review and return a ReviewerOutput.
-    If approved=false, call start_session with review_feedback to begin a new iteration.
+    This method is idempotent: calling it twice with the same session_id and
+    completed_phase returns the same next instruction without advancing state twice.
+
+    Keep calling until current_phase == 'complete' or 'failed' (is_terminal=True).
     """
     pool: asyncpg.Pool = ctx.lifespan_context["pool"]
-    logger.info("[reviewer] run_review | session=%s | files=%s", session_id, list(changed_files.keys()))
-
-    start_time = asyncio.get_event_loop().time()
-    lint_results = await _run_linters(changed_files)
-    step_id: str | None = None
-
-    async with pool.acquire() as conn:
-        try:
-            await queries.mark_step_finished_by_name(conn, session_id, "implement")
-            step_id = await queries.mark_step_running(conn, session_id, "review")
-            duration_ms = int((asyncio.get_event_loop().time() - start_time) * 1000)
-            await queries.append_context(
-                conn,
-                _new_uuid7(),
-                session_id,
-                "review",
-                {
-                    "diff_preview": diff[:500],
-                    "changed_files": list(changed_files.keys()),
-                    "lint_errors": lint_results.get("errors", False),
-                    "ruff_output": lint_results.get("ruff", "")[:300],
-                    "mypy_output": lint_results.get("mypy", "")[:300],
-                },
-                summary=f"Reviewer: {len(changed_files)} files changed",
-                agent="reviewer",
-                duration_ms=duration_ms,
-                step_id=step_id,
-            )
-            await queries.mark_step_finished(conn, step_id)
-        except Exception as exc:
-            if step_id:
-                await queries.mark_step_failed(conn, step_id, str(exc))
-            raise
-
-    return reviewer.build_instruction(
-        reviewer.ReviewerInput(
-            diff=diff,
-            changed_files=changed_files,
-            project_context=project_context,
-            plan=plan,
-            lint_results=lint_results,
-        ),
-        session_id=session_id,
+    logger.info(
+        "[server] advance_task | session=%s | phase=%s | approved=%s",
+        session_id,
+        completed_phase,
+        result.get("approved", "n/a"),
     )
+    return await orchestrator.advance(session_id, completed_phase, result, pool)
 
 
-# ── Tool 5: fetch_context ────────────────────────────────────────────────────
+# ── Tool 3: get_current_status ────────────────────────────────────────────────
+
+@mcp.tool()
+async def get_current_status(
+    session_id: Annotated[str, Field(description="Session ID to inspect")],
+    ctx: Context,
+) -> dict:
+    """
+    Recovery tool. Returns the current phase, retry count, lessons learned, and step states.
+
+    Call this if the autonomous loop was interrupted to understand where to resume without
+    losing context or duplicating work.
+    """
+    pool: asyncpg.Pool = ctx.lifespan_context["pool"]
+    logger.info("[server] get_current_status | session=%s", session_id)
+    return await orchestrator.get_status(session_id, pool)
+
+
+# ── Tool 4: fetch_context ─────────────────────────────────────────────────────
 
 @mcp.tool()
 async def fetch_context(
@@ -425,24 +186,27 @@ async def fetch_context(
     ] = 10,
 ) -> dict:
     """
-    Query the PostgreSQL database for historical context.
+    Query PostgreSQL for historical context.
 
-    Returns matching sessions and context events to help with understanding
-    past decisions, patterns, and prior implementations.
+    Returns matching sessions and context events to help understand past decisions,
+    patterns, and prior implementations. Also returns task_history for any session.
     """
     pool: asyncpg.Pool = ctx.lifespan_context["pool"]
-    logger.info("[db] fetch_context | query=%.80s | session=%s", query, session_id or "*")
+    logger.info("[server] fetch_context | query=%.80s | session=%s", query, session_id or "*")
 
     async with pool.acquire() as conn:
         if session_id:
             events = await queries.get_session_context(conn, session_id)
             session = await queries.get_session(conn, session_id)
             steps = await queries.get_session_steps(conn, session_id)
+            history = await queries.get_task_history(conn, session_id)
             return {
                 "session": _serialize(session),
                 "steps": [_serialize(s) for s in steps],
                 "events": [_serialize(e) for e in events],
-                "total": len(events),
+                "task_history": [_serialize(h) for h in history],
+                "total_events": len(events),
+                "total_iterations": len(history),
             }
 
         matches = await queries.search_context(conn, query, limit=limit)
