@@ -313,6 +313,34 @@ async def _handle_review_final(
 
     retry_count = await queries.get_session_retry_count(conn, session_id)
 
+    # Build critique (used for both the log and the retry instruction)
+    critique_parts: list[str] = []
+    if not lint_passed:
+        issues = lint_result.get("issues") or []
+        ruff = lint_result.get("raw_ruff_output", "")
+        critique_parts.append(f"Lint failures:\n{ruff or chr(10).join(issues)}")
+    if not arch_passed:
+        violations = arch_result.get("violations") or []
+        critique_parts.append("Architecture violations:\n" + "\n".join(violations))
+    if result.get("required_changes"):
+        critique_parts.append("Manager required changes:\n" + "\n".join(result["required_changes"]))
+    critique = "\n\n".join(critique_parts) or result.get("feedback", "")
+    lessons_line = _one_liner_critique(critique, retry_count + 1, lint_passed, arch_passed)
+
+    # Log every iteration — approved or not — so task_history is never empty after a run
+    implementation = _json_field(session, "implementation")
+    await queries.log_task_history(
+        conn,
+        session_id,
+        retry_count + 1,
+        reviewer_critique=critique,
+        diff=implementation.get("explanation", ""),
+        lint_output=lint_result,
+        arch_output=arch_result,
+        is_approved=effective_approved,
+        lessons_learned=lessons_line,
+    )
+
     if effective_approved:
         await queries.update_session_review(conn, session_id, result, "approved")
         await queries.mark_step_finished_by_name(conn, session_id, "review")
@@ -331,35 +359,6 @@ async def _handle_review_final(
             output_schema={"type": "object"},
             is_terminal=True,
         )
-
-    # Build critique incorporating sub-agent failures
-    critique_parts: list[str] = []
-    if not lint_passed:
-        issues = lint_result.get("issues") or []
-        ruff = lint_result.get("raw_ruff_output", "")
-        critique_parts.append(f"Lint failures:\n{ruff or chr(10).join(issues)}")
-    if not arch_passed:
-        violations = arch_result.get("violations") or []
-        critique_parts.append("Architecture violations:\n" + "\n".join(violations))
-    if result.get("required_changes"):
-        critique_parts.append("Manager required changes:\n" + "\n".join(result["required_changes"]))
-    critique = "\n\n".join(critique_parts) or result.get("feedback", "Review rejected.")
-
-    lessons_line = _one_liner_critique(critique, retry_count + 1, lint_passed, arch_passed)
-
-    # Log iteration
-    implementation = _json_field(session, "implementation")
-    await queries.log_task_history(
-        conn,
-        session_id,
-        retry_count + 1,
-        reviewer_critique=critique,
-        diff=implementation.get("explanation", ""),
-        lint_output=lint_result,
-        arch_output=arch_result,
-        is_approved=False,
-        lessons_learned=lessons_line,
-    )
 
     new_retry_count = retry_count + 1
 
