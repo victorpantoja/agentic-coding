@@ -231,7 +231,7 @@ async def _build_next(
             return phase_instr.model_copy(update={"retry_count": retry_count})
 
         case "implement":
-            plan = session.get("plan") or {}
+            plan = _json_field(session, "plan")
             implementation = result
             reviewer_input = reviewer.ReviewerInput(
                 diff=implementation.get("explanation", ""),
@@ -246,8 +246,8 @@ async def _build_next(
         case "review_lint":
             lint_result = result
             # Retrieve implementation from session for arch review
-            implementation = session.get("implementation") or {}
-            plan = session.get("plan") or {}
+            implementation = _json_field(session, "implementation")
+            plan = _json_field(session, "plan")
             reviewer_input = reviewer.ReviewerInput(
                 diff=implementation.get("explanation", ""),
                 changed_files={implementation.get("file_path", ""): implementation.get("code", "")},
@@ -262,8 +262,8 @@ async def _build_next(
             # Retrieve lint result from context_history
             ctx_events = await queries.get_session_context(conn, session_id)
             lint_result = _extract_sub_agent_result(ctx_events, "review_lint")
-            implementation = session.get("implementation") or {}
-            plan = session.get("plan") or {}
+            implementation = _json_field(session, "implementation")
+            plan = _json_field(session, "plan")
             reviewer_input = reviewer.ReviewerInput(
                 diff=implementation.get("explanation", ""),
                 changed_files={implementation.get("file_path", ""): implementation.get("code", "")},
@@ -348,7 +348,7 @@ async def _handle_review_final(
     lessons_line = _one_liner_critique(critique, retry_count + 1, lint_passed, arch_passed)
 
     # Log iteration
-    implementation = session.get("implementation") or {}
+    implementation = _json_field(session, "implementation")
     await queries.log_task_history(
         conn,
         session_id,
@@ -406,7 +406,7 @@ async def _handle_review_final(
     all_history = await queries.get_task_history(conn, session_id)
     all_lessons = _summarise_lessons(all_history)
 
-    test_spec = session.get("test_spec") or {}
+    test_spec = _json_field(session, "test_spec")
     test_code = test_spec.get("test_code", "")
     test_file_path = test_spec.get("test_file_path", "tests/test_generated.py")
 
@@ -426,6 +426,19 @@ async def _handle_review_final(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _json_field(session: dict[str, Any], key: str) -> dict[str, Any]:
+    """Decode a JSONB session field — asyncpg returns them as raw JSON strings."""
+    value = session.get(key)
+    if not value:
+        return {}
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value  # already a dict
 
 
 def _wrap_as_phase(
