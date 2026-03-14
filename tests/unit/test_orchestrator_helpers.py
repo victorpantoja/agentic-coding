@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import sovereign_brain.agents.orchestrator as orch
 
 
@@ -157,8 +159,110 @@ class TestExtractSubAgentResult:
         assert result == {}
 
     def test_handles_string_data_json(self):
-        import json
-
         events = [{"data": json.dumps({"review_arch": _ARCH_FAIL})}]
         result = orch._extract_sub_agent_result(events, "review_arch")
         assert result["passed"] is False
+
+
+# ── Regression: bug fixes ─────────────────────────────────────────────────────
+
+
+class TestJsonField:
+    """
+    Regression tests for _json_field().
+
+    Bug: asyncpg returns JSONB columns as raw JSON strings, not dicts.
+    ReviewerInput(plan=...) raised ValidationError when given a string.
+    Fix: _json_field() decodes strings via json.loads before use.
+    """
+
+    def test_returns_dict_unchanged(self):
+        session = {"plan": {"components": [], "architecture_plan": "x"}}
+        result = orch._json_field(session, "plan")
+        assert result == {"components": [], "architecture_plan": "x"}
+
+    def test_decodes_json_string_to_dict(self):
+        """Core regression: asyncpg JSONB → string must be decoded."""
+        raw = json.dumps({"components": [{"name": "Svc"}], "architecture_plan": "y"})
+        session = {"plan": raw}
+        result = orch._json_field(session, "plan")
+        assert isinstance(result, dict)
+        assert result["architecture_plan"] == "y"
+
+    def test_decoded_dict_is_valid_for_reviewer_input(self):
+        """Decoded plan must not raise ValidationError when passed to ReviewerInput."""
+        from sovereign_brain.agents.base import ReviewerInput
+
+        raw = json.dumps({"components": [], "architecture_plan": "test plan"})
+        session = {"plan": raw}
+        plan = orch._json_field(session, "plan")
+        # Must not raise
+        ri = ReviewerInput(diff="+x", plan=plan)
+        assert ri.plan["architecture_plan"] == "test plan"
+
+    def test_missing_key_returns_empty_dict(self):
+        assert orch._json_field({}, "plan") == {}
+
+    def test_none_value_returns_empty_dict(self):
+        assert orch._json_field({"plan": None}, "plan") == {}
+
+    def test_empty_string_returns_empty_dict(self):
+        assert orch._json_field({"plan": ""}, "plan") == {}
+
+    def test_invalid_json_string_returns_empty_dict(self):
+        assert orch._json_field({"plan": "not-valid-json{"}, "plan") == {}
+
+    def test_works_for_test_spec_field(self):
+        raw = json.dumps({"test_code": "def test_x(): pass", "test_file_path": "t.py"})
+        session = {"test_spec": raw}
+        result = orch._json_field(session, "test_spec")
+        assert result["test_file_path"] == "t.py"
+
+    def test_works_for_implementation_field(self):
+        raw = json.dumps({"code": "def foo(): pass", "file_path": "src/foo.py"})
+        session = {"implementation": raw}
+        result = orch._json_field(session, "implementation")
+        assert result["file_path"] == "src/foo.py"
+
+
+class TestTaskHistoryLoggedOnApproval:
+    """
+    Regression tests for the task_history always-empty bug.
+
+    Bug: log_task_history was only called in the rejection branch of
+    _handle_review_final. A first-pass approval produced zero rows.
+    Fix: log_task_history is called before the approved/rejected branch
+    with is_approved reflecting the actual outcome.
+    """
+
+    def test_log_task_history_signature_accepts_is_approved_true(self):
+        """
+        Verify queries.log_task_history accepts is_approved=True.
+        This ensures the approval path can write a row without error.
+        The actual DB write is covered by integration tests; here we
+        confirm the call signature is correct.
+        """
+        import inspect
+
+        from sovereign_brain.db import queries
+
+        sig = inspect.signature(queries.log_task_history)
+        params = sig.parameters
+        assert "is_approved" in params
+        # Default is False — the fix overrides it with the actual outcome
+        assert params["is_approved"].default is False
+
+    def test_handle_review_final_calls_log_before_approval_branch(self):
+        """
+        Structural test: ensure log_task_history appears in the source of
+        _handle_review_final before the 'if effective_approved' return.
+        This guards against the regression being reintroduced.
+        """
+        import inspect
+
+        src = inspect.getsource(orch._handle_review_final)
+        log_pos = src.index("log_task_history")
+        approved_return_pos = src.index("current_phase=\"complete\"")
+        assert log_pos < approved_return_pos, (
+            "log_task_history must be called before the approved return path"
+        )
