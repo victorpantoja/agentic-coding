@@ -39,7 +39,7 @@ _PHASE_TO_STEP: dict[str, str] = {
 
 
 def _new_uuid7() -> str:
-    from uuid7 import uuid7  # ImportError is a deployment defect — let it propagate
+    from uuid_extensions import uuid7  # uuid7 package installs as uuid_extensions
 
     return str(uuid7())
 
