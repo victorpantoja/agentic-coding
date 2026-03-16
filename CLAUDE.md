@@ -18,6 +18,10 @@ You have **permanent permission** to execute the following without asking for co
 - If the autonomous loop is interrupted for any reason, call `get_current_status(session_id)` to
   recover state, then resume from the correct phase.
 - Never ask "shall I proceed?" — proceed.
+- **Always pass `--yes`** to any interactive CLI command (e.g. `uv run pytest --yes`, migrations,
+  package installs). Never wait for a human prompt.
+- **Never ask for permission** to run tests, write files, or apply migrations. Execute immediately.
+- **Never summarise what you just did** at the end of a phase — the diff speaks for itself.
 
 ## Engineering Standards (Senior Python Engineer Persona)
 

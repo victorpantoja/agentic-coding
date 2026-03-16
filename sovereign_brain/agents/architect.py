@@ -1,5 +1,6 @@
 """Architect agent — structural planning, DDD/UUIDv7 enforcement."""
 
+from __future__ import annotations
 
 from sovereign_brain.agents.base import (
     AgentInstruction,

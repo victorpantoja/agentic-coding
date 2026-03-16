@@ -1,5 +1,9 @@
 """Tester agent — Red phase: write failing tests before any implementation."""
 
+from __future__ import annotations
+
+import json
+
 from sovereign_brain.agents.base import (
     AgentInstruction,
     TesterInput,
@@ -17,7 +21,6 @@ def build_instruction(input: TesterInput, session_id: str) -> AgentInstruction:
     parts = [f"## Test Scenario\n{input.scenario}"]
 
     if input.plan:
-        import json
         parts.append(f"## Architecture Plan\n```json\n{json.dumps(input.plan, indent=2)}\n```")
 
     if input.project_context:

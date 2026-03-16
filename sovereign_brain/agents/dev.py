@@ -1,5 +1,7 @@
 """Dev agent — Green phase: write minimal code to make failing tests pass."""
 
+from __future__ import annotations
+
 from sovereign_brain.agents.base import (
     AgentInstruction,
     DevInput,

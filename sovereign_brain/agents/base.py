@@ -1,6 +1,9 @@
 """Base utilities: prompt loading, input/output models, shared types."""
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, field_validator
 
@@ -25,7 +28,7 @@ class AgentInstruction(BaseModel):
     action_required: str
     session_id: str
     step: str  # 'plan' | 'test' | 'implement' | 'review'
-    context: dict = {}
+    context: dict[str, Any] = {}
 
 
 class ArchitectInput(BaseModel):
@@ -36,14 +39,14 @@ class ArchitectInput(BaseModel):
 
 class ArchitectOutput(BaseModel):
     architecture_plan: str
-    components: list[dict]
+    components: list[dict[str, Any]]
     bounded_contexts: list[str] = []
-    data_models: list[dict] = []
+    data_models: list[dict[str, Any]] = []
     implementation_phases: list[str] = []
 
 
 class TesterInput(BaseModel):
-    plan: dict
+    plan: dict[str, Any]
     scenario: str
     existing_code: dict[str, str] = {}
     project_context: str = ""
@@ -76,14 +79,14 @@ class ReviewerInput(BaseModel):
     diff: str
     changed_files: dict[str, str] = {}
     project_context: str = ""
-    plan: dict = {}
-    lint_results: dict = {}  # {"ruff": "...", "mypy": "...", "errors": bool}
+    plan: dict[str, Any] = {}
+    lint_results: dict[str, Any] = {}  # {"ruff": "...", "mypy": "...", "errors": bool}
 
 
 class ReviewerOutput(BaseModel):
     approved: bool
     feedback: str
-    issues: list[dict] = []
+    issues: list[dict[str, Any]] = []
     vibe_score: int = 8
     vibe_notes: str = ""
     required_changes: list[str] = []
@@ -137,14 +140,14 @@ class PhaseInstruction(BaseModel):
     system_prompt: str
     user_message: str
     action_required: str
-    output_schema: dict  # model_json_schema() of the expected result type
+    output_schema: dict[str, Any]  # model_json_schema() of the expected result type
     retry_count: int = 0
-    context: dict = {}  # injected lessons_learned from previous retries
+    context: dict[str, Any] = {}  # injected lessons_learned from previous retries
     is_terminal: bool = False  # True for complete/failed — stop the loop
 
     @field_validator("output_schema", mode="before")
     @classmethod
-    def ensure_schema_populated(cls, v: dict) -> dict:
+    def ensure_schema_populated(cls, v: dict[str, Any]) -> dict[str, Any]:
         if not v:
             raise ValueError("output_schema must be populated via model_json_schema()")
         return v

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from typing import Any
 
 import asyncpg
@@ -40,12 +39,9 @@ _PHASE_TO_STEP: dict[str, str] = {
 
 
 def _new_uuid7() -> str:
-    try:
-        from uuid7 import uuid7
+    from uuid7 import uuid7  # ImportError is a deployment defect — let it propagate
 
-        return str(uuid7())
-    except ImportError:
-        return str(uuid.uuid4())
+    return str(uuid7())
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -331,6 +327,7 @@ async def _handle_review_final(
     implementation = _json_field(session, "implementation")
     await queries.log_task_history(
         conn,
+        _new_uuid7(),
         session_id,
         retry_count + 1,
         reviewer_critique=critique,
