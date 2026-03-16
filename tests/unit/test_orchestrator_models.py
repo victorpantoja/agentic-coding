@@ -85,8 +85,7 @@ class TestPhaseInstruction:
             session_id=SESSION,
             current_phase="plan",
             system_prompt="You are the Architect.",
-            user_message="Design a health endpoint.",
-            action_required="Return JSON matching output_schema.",
+            task_instructions="Design a health endpoint. Return JSON matching output_schema.",
             output_schema={"type": "object", "properties": {"x": {"type": "string"}}},
         )
         assert pi.current_phase == "plan"
@@ -99,8 +98,7 @@ class TestPhaseInstruction:
                 session_id=SESSION,
                 current_phase="plan",
                 system_prompt="x",
-                user_message="x",
-                action_required="x",
+                task_instructions="x",
                 output_schema={},  # empty — should fail
             )
 
@@ -109,8 +107,7 @@ class TestPhaseInstruction:
             session_id=SESSION,
             current_phase="complete",
             system_prompt="",
-            user_message="Done.",
-            action_required="Notify user.",
+            task_instructions="Done. Notify user.",
             output_schema={"type": "object"},
             is_terminal=True,
         )
@@ -121,8 +118,7 @@ class TestPhaseInstruction:
             session_id=SESSION,
             current_phase="implement",
             system_prompt="x",
-            user_message="x",
-            action_required="x",
+            task_instructions="x",
             output_schema={"type": "object"},
             context={"lessons_learned": "Retry 1: use uuid7()"},
         )
@@ -134,8 +130,7 @@ class TestPhaseInstruction:
             session_id=SESSION,
             current_phase="review_final",
             system_prompt="x",
-            user_message="x",
-            action_required="x",
+            task_instructions="x",
             output_schema=schema,
         )
         assert "approved" in pi.output_schema.get("properties", {})
@@ -145,8 +140,7 @@ class TestPhaseInstruction:
             session_id=SESSION,
             current_phase="implement",
             system_prompt="x",
-            user_message="x",
-            action_required="x",
+            task_instructions="x",
             output_schema={"type": "object"},
         )
         assert pi.retry_count == 0

@@ -1,5 +1,6 @@
 """Unit tests for the four agent instruction builders."""
 
+from __future__ import annotations
 
 import sovereign_brain.agents.architect as _architect_mod
 import sovereign_brain.agents.dev as _dev_mod
@@ -125,6 +126,11 @@ class TestDevAgent:
             session_id=SESSION,
         )
         assert isinstance(result, AgentInstruction)
+
+    def test_build_from_plan_when_no_test_code(self):
+        result = dev_build(DevInput(plan=PLAN), session_id=SESSION)
+        assert isinstance(result, AgentInstruction)
+        assert "Implementation Task" in result.user_message
 
     def test_agent_name_is_dev(self):
         result = dev_build(

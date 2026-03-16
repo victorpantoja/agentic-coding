@@ -98,7 +98,7 @@ def build_lint_instruction(
 ) -> PhaseInstruction:
     """
     PhaseInstruction for the LintAgent sub-agent persona (phase: review_lint).
-    Claude will run ruff + mypy and return a LintResult.
+    Claude will run ruff + mypy --strict and return a LintResult.
     """
     system_prompt = load_prompt("lint_agent")
 
@@ -122,20 +122,20 @@ def build_lint_instruction(
             "Previous iterations failed — ensure ALL lint errors are resolved."
         )
 
-    user_message = "\n\n".join(parts)
+    task_instructions = "\n\n".join(parts) + (
+        "\n\n## Task\n"
+        "Run `uv run ruff check . --output-format=concise` and "
+        "`uv run mypy --strict .` via your Bash tool. "
+        "Copy the full terminal output verbatim into raw_ruff_output and raw_mypy_output. "
+        "Set passed=true only if both commands produce zero errors. "
+        "Return a JSON object matching output_schema exactly."
+    )
 
     return PhaseInstruction(
         session_id=session_id,
         current_phase="review_lint",
         system_prompt=system_prompt,
-        user_message=user_message,
-        action_required=(
-            "You are the LintAgent. Run `uv run ruff check . --output-format=concise` and "
-            "`uv run mypy --ignore-missing-imports --no-error-summary .` via your Bash tool. "
-            "Copy the full terminal output verbatim into raw_ruff_output and raw_mypy_output. "
-            "Set passed=true only if both commands produce zero errors. "
-            "Return a JSON object matching output_schema exactly."
-        ),
+        task_instructions=task_instructions,
         output_schema=LintResult.model_json_schema(),
         retry_count=retry_count,
     )
@@ -176,18 +176,23 @@ def build_arch_instruction(
     if input.project_context:
         parts.append(f"## Project Context\n{input.project_context}")
 
-    user_message = "\n\n".join(parts)
+    task_instructions = "\n\n".join(parts) + (
+        "\n\n## Task\n"
+        "You are the ArchitectureAgent. Inspect the changed files for:\n"
+        "1. **SOLID violations** — flag god classes, missing abstractions, etc.\n"
+        "2. **DDD boundary leaks** — `sovereign_brain/db/` must NOT be imported by "
+        "`sovereign_brain/mcp/` directly. All DB access must route exclusively through "
+        "`sovereign_brain/agents/`. Flag any violation of this rule immediately.\n"
+        "3. **UUIDv7 compliance** — all entity IDs must use "
+        "`from uuid_extensions import uuid7`. Any `uuid.uuid4()` call is a defect.\n"
+        "Return a JSON object matching output_schema exactly."
+    )
 
     return PhaseInstruction(
         session_id=session_id,
         current_phase="review_arch",
         system_prompt=system_prompt,
-        user_message=user_message,
-        action_required=(
-            "You are the ArchitectureAgent. Inspect the changed files for SOLID violations, "
-            "DDD boundary leaks, and UUIDv7 compliance. "
-            "Return a JSON object matching output_schema exactly."
-        ),
+        task_instructions=task_instructions,
         output_schema=ArchitectureResult.model_json_schema(),
     )
 
@@ -246,27 +251,27 @@ def build_manager_instruction(
         "## Review Checklist\n"
         "- [ ] All tests pass\n"
         "- [ ] ruff check passes (see LintAgent report)\n"
-        "- [ ] mypy passes (see LintAgent report)\n"
+        "- [ ] mypy --strict passes (see LintAgent report)\n"
         "- [ ] Entity IDs use UUIDv7\n"
-        "- [ ] DDD boundaries respected (see ArchitectureAgent report)\n"
+        "- [ ] DDD boundaries respected — db/ not imported by mcp/ (see ArchitectureAgent report)\n"
         "- [ ] No security vulnerabilities\n"
         "- [ ] Code follows project conventions\n"
         "- [ ] Vibe score >= 6\n"
         "- [ ] No obvious performance bottlenecks"
     )
 
-    user_message = "\n\n".join(parts)
+    task_instructions = "\n\n".join(parts) + (
+        "\n\n## Task\n"
+        "You are the ManagerReviewer. Both sub-agent reports are above. "
+        "Apply the Hard Gate Rule: if either sub-agent passed=false, set approved=false. "
+        "Then apply your own quality judgement for correctness, security, and vibe. "
+        "Return a JSON object matching output_schema exactly."
+    )
 
     return PhaseInstruction(
         session_id=session_id,
         current_phase="review_final",
         system_prompt=system_prompt,
-        user_message=user_message,
-        action_required=(
-            "You are the ManagerReviewer. Both sub-agent reports are above. "
-            "Apply the Hard Gate Rule: if either sub-agent passed=false, set approved=false. "
-            "Then apply your own quality judgement for correctness, security, and vibe. "
-            "Return a JSON object matching output_schema exactly."
-        ),
+        task_instructions=task_instructions,
         output_schema=ReviewerOutput.model_json_schema(),
     )
