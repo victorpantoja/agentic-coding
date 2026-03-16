@@ -16,12 +16,15 @@ Inspect the changed files and diff carefully against each of these rules:
 - No business logic inside `sovereign_brain/mcp/` — tools must delegate to agents/orchestrator.
 
 ### ID Conventions
-- All entity primary keys must use `uuid7()` from the `uuid7` package. **UUID4 is a violation.**
+- All entity primary keys must use `uuid7()` from `uuid_extensions` (`from uuid_extensions import uuid7`). **UUID4 is a violation.**
 - Any `uuid.uuid4()` call in domain entities or DB inserts is a defect.
 
 ### Import Hygiene
 - No circular imports between layers.
-- `sovereign_brain/mcp/` may import `sovereign_brain/agents/` and `sovereign_brain/db/`.
+- **`sovereign_brain/mcp/` MUST NOT import `sovereign_brain/db/` directly.** All database
+  operations must route exclusively through `sovereign_brain/agents/`. Any `from sovereign_brain.db`
+  or `import sovereign_brain.db` inside `mcp/` files is an immediate critical violation.
+- `sovereign_brain/mcp/` may only import from `sovereign_brain/agents/` and `sovereign_brain/config`.
 - `sovereign_brain/agents/` must not import from `sovereign_brain/mcp/`.
 
 ## Output Rules

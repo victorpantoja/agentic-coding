@@ -1,5 +1,12 @@
 """
-Autonomous orchestrator — drives the Architect → Tester → Dev → Reviewer gated loop.
+Autonomous orchestrator — drives the Architect → Dev → Reviewer gated loop.
+
+State machine phases:
+  plan          → architect.py produces an architecture plan
+  implement     → dev.py writes the code from the plan (or fixes a failing test on retry)
+  review_lint   → Claude runs ruff + mypy --strict
+  review_arch   → Claude checks DDD boundaries (db/ not imported by mcp/) + UUIDv7
+  review_final  → Manager applies hard gate; on failure returns new implement instruction
 
 The server is the state machine; Claude CLI is the intelligence.
 No LLM calls are made here — only DB persistence and PhaseInstruction construction.
@@ -13,12 +20,11 @@ from typing import Any
 
 import asyncpg
 
-from sovereign_brain.agents import architect, dev, reviewer, tester
+from sovereign_brain.agents import architect, dev, reviewer
 from sovereign_brain.agents.base import (
     ArchitectOutput,
     DevOutput,
     PhaseInstruction,
-    TesterOutput,
 )
 from sovereign_brain.db import queries
 
@@ -26,11 +32,10 @@ logger = logging.getLogger("sovereign_brain.orchestrator")
 
 MAX_RETRIES = 3
 
-# Maps phases that have a backing session_steps row to that row's step_name.
-# Review sub-phases all map to the single "review" step.
+# Maps phases to their backing session_steps row.
+# All three review sub-phases share the single "review" step.
 _PHASE_TO_STEP: dict[str, str] = {
     "plan": "plan",
-    "test": "test",
     "implement": "implement",
     "review_lint": "review",
     "review_arch": "review",
@@ -48,9 +53,9 @@ def _new_uuid7() -> str:
 
 
 async def start(request: str, project_context: str, pool: asyncpg.Pool) -> PhaseInstruction:
-    """Create a new session and return the first PhaseInstruction (Architect)."""
+    """Create a new session and return the first PhaseInstruction (plan)."""
     session_id = _new_uuid7()
-    step_ids = {k: _new_uuid7() for k in ("plan", "test", "implement", "review")}
+    step_ids = {k: _new_uuid7() for k in ("plan", "implement", "review")}
 
     async with pool.acquire() as conn:
         await queries.create_session(conn, session_id, request)
@@ -141,19 +146,12 @@ async def _persist(
     session_id: str,
     phase: str,
     result: dict[str, Any],
-    steps: list[dict],
+    steps: list[dict[str, Any]],
 ) -> None:
-    step_name = _PHASE_TO_STEP.get(phase)
-
     match phase:
         case "plan":
             await queries.update_session_plan(conn, session_id, result)
             await queries.mark_step_finished_by_name(conn, session_id, "plan")
-            await queries.mark_step_running(conn, session_id, "test")
-
-        case "test":
-            await queries.update_session_test_spec(conn, session_id, result)
-            await queries.mark_step_finished_by_name(conn, session_id, "test")
             await queries.mark_step_running(conn, session_id, "implement")
 
         case "implement":
@@ -180,9 +178,6 @@ async def _persist(
         case _:
             logger.warning("[orchestrator] unknown phase %r — skipping persist", phase)
 
-    if step_name and phase not in ("review_lint", "review_arch", "review_final"):
-        logger.info("[orchestrator] persisted phase=%s session=%s", phase, session_id)
-
 
 # ── Next instruction builder ──────────────────────────────────────────────────
 
@@ -199,24 +194,10 @@ async def _build_next(
     match completed_phase:
         case "plan":
             plan = result
-            instruction = tester.build_instruction(
-                tester.TesterInput(
-                    plan=plan,
-                    scenario=_first_scenario(plan),
-                    project_context=session.get("request", ""),
-                ),
-                session_id=session_id,
-            )
-            return _wrap_as_phase(instruction, "test", session_id, TesterOutput, lessons=lessons)
-
-        case "test":
-            test_code = result.get("test_code", "")
-            test_file_path = result.get("test_file_path", "tests/test_generated.py")
             retry_count = await queries.get_session_retry_count(conn, session_id)
             instruction = dev.build_instruction(
                 dev.DevInput(
-                    test_code=test_code,
-                    test_file_path=test_file_path,
+                    plan=plan,
                     project_context=session.get("request", ""),
                 ),
                 session_id=session_id,
@@ -241,7 +222,6 @@ async def _build_next(
 
         case "review_lint":
             lint_result = result
-            # Retrieve implementation from session for arch review
             implementation = _json_field(session, "implementation")
             plan = _json_field(session, "plan")
             reviewer_input = reviewer.ReviewerInput(
@@ -255,7 +235,6 @@ async def _build_next(
 
         case "review_arch":
             arch_result = result
-            # Retrieve lint result from context_history
             ctx_events = await queries.get_session_context(conn, session_id)
             lint_result = _extract_sub_agent_result(ctx_events, "review_lint")
             implementation = _json_field(session, "implementation")
@@ -275,14 +254,12 @@ async def _build_next(
             return await _handle_review_final(conn, session_id, result, session, lessons)
 
         case _:
-            # Defensive: should not happen
             logger.error("[orchestrator] unexpected completed_phase=%r", completed_phase)
             return PhaseInstruction(
                 session_id=session_id,
                 current_phase="failed",
                 system_prompt="",
-                user_message=f"Unexpected phase: {completed_phase!r}",
-                action_required="Report this error to the user.",
+                task_instructions=f"Unexpected phase: {completed_phase!r}. Report this error.",
                 output_schema={"type": "object"},
                 is_terminal=True,
             )
@@ -309,7 +286,7 @@ async def _handle_review_final(
 
     retry_count = await queries.get_session_retry_count(conn, session_id)
 
-    # Build critique (used for both the log and the retry instruction)
+    # Build critique for the log and any retry instruction
     critique_parts: list[str] = []
     if not lint_passed:
         issues = lint_result.get("issues") or []
@@ -323,7 +300,7 @@ async def _handle_review_final(
     critique = "\n\n".join(critique_parts) or result.get("feedback", "")
     lessons_line = _one_liner_critique(critique, retry_count + 1, lint_passed, arch_passed)
 
-    # Log every iteration — approved or not — so task_history is never empty after a run
+    # Log every iteration — approved or not
     implementation = _json_field(session, "implementation")
     await queries.log_task_history(
         conn,
@@ -348,11 +325,11 @@ async def _handle_review_final(
             session_id=session_id,
             current_phase="complete",
             system_prompt="",
-            user_message=(
+            task_instructions=(
                 f"Task completed successfully after {retry_count + 1} iteration(s).\n\n"
-                f"Reviewer feedback: {result.get('feedback', '')}"
+                f"Reviewer feedback: {result.get('feedback', '')}\n\n"
+                "Notify the user that the autonomous task is complete."
             ),
-            action_required="Notify the user that the autonomous task is complete.",
             output_schema={"type": "object"},
             is_terminal=True,
         )
@@ -367,11 +344,9 @@ async def _handle_review_final(
             session_id=session_id,
             current_phase="failed",
             system_prompt="",
-            user_message=(
+            task_instructions=(
                 f"The Gated Loop failed after {MAX_RETRIES} retries.\n\n"
-                f"Final critique:\n{critique}"
-            ),
-            action_required=(
+                f"Final critique:\n{critique}\n\n"
                 "Notify the user that the autonomous loop has failed and present the critique."
             ),
             output_schema={"type": "object"},
@@ -379,37 +354,25 @@ async def _handle_review_final(
             is_terminal=True,
         )
 
-    # Reset implement step for retry
+    # Reset implement + review steps for retry
     await conn.execute(
         """
         UPDATE session_steps
         SET status = 'pending', started_at = NULL, ended_at = NULL, error_details = NULL
-        WHERE session_id = $1::uuid AND step_name = 'implement'
-        """,
-        session_id,
-    )
-    await conn.execute(
-        """
-        UPDATE session_steps
-        SET status = 'pending', started_at = NULL, ended_at = NULL, error_details = NULL
-        WHERE session_id = $1::uuid AND step_name = 'review'
+        WHERE session_id = $1::uuid AND step_name IN ('implement', 'review')
         """,
         session_id,
     )
     await queries.mark_step_running(conn, session_id, "implement")
 
-    # Aggregate all lessons for next Dev instruction
+    # Aggregate all lessons for the next Dev instruction
     all_history = await queries.get_task_history(conn, session_id)
     all_lessons = _summarise_lessons(all_history)
 
-    test_spec = _json_field(session, "test_spec")
-    test_code = test_spec.get("test_code", "")
-    test_file_path = test_spec.get("test_file_path", "tests/test_generated.py")
-
+    plan = _json_field(session, "plan")
     instruction = dev.build_instruction(
         dev.DevInput(
-            test_code=test_code,
-            test_file_path=test_file_path,
+            plan=plan,
             error_output=critique,
             project_context=session.get("request", ""),
         ),
@@ -454,16 +417,19 @@ def _wrap_as_phase(
     if lessons:
         ctx["lessons_learned"] = lessons
 
+    task_instructions = (
+        instruction.user_message
+        + "\n\n## Action Required\n"
+        + instruction.action_required
+        + "\n\nReturn a JSON object that strictly matches the provided output_schema."
+        + (f"\n\n## Lessons from previous retries\n{lessons}" if lessons else "")
+    )
+
     return PhaseInstruction(
         session_id=session_id,
         current_phase=phase,
         system_prompt=instruction.system_prompt,
-        user_message=instruction.user_message,
-        action_required=(
-            instruction.action_required
-            + "\n\nReturn a JSON object that strictly matches the provided output_schema."
-            + (f"\n\nLessons from previous retries: {lessons}" if lessons else "")
-        ),
+        task_instructions=task_instructions,
         output_schema=result_model.model_json_schema(),
         retry_count=retry_count,
         context=ctx,
@@ -506,7 +472,7 @@ def _first_scenario(plan: dict[str, Any]) -> str:
     return "Implement the primary feature"
 
 
-def _derive_current_phase(steps: list[dict], session: dict[str, Any]) -> str:
+def _derive_current_phase(steps: list[dict[str, Any]], session: dict[str, Any]) -> str:
     status_map = {s["step_name"]: s["status"] for s in steps}
     if status_map.get("review") == "finished":
         review_status = session.get("status", "")
@@ -515,12 +481,10 @@ def _derive_current_phase(steps: list[dict], session: dict[str, Any]) -> str:
         return "review_lint"  # conservative — exact sub-phase not stored
     if status_map.get("implement") == "running":
         return "implement"
-    if status_map.get("test") == "running":
-        return "test"
     return "plan"
 
 
-def _extract_sub_agent_result(ctx_events: list[dict], phase: str) -> dict[str, Any]:
+def _extract_sub_agent_result(ctx_events: list[dict[str, Any]], phase: str) -> dict[str, Any]:
     """Pull the latest sub-agent result from context_history events."""
     for event in reversed(ctx_events):
         data = event.get("data") or {}

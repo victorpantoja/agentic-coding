@@ -98,36 +98,31 @@ class TestFirstScenario:
 
 class TestDeriveCurrentPhase:
     def _make_steps(self, statuses: dict[str, str]) -> list[dict]:
-        names = ["plan", "test", "implement", "review"]
+        # 3-step flow: plan → implement → review (test phase removed)
+        names = ["plan", "implement", "review"]
         return [{"step_name": n, "status": statuses.get(n, "pending")} for n in names]
 
     def test_plan_running_returns_plan(self):
         steps = self._make_steps({"plan": "running"})
         assert orch._derive_current_phase(steps, {}) == "plan"
 
-    def test_test_running_returns_test(self):
-        steps = self._make_steps({"plan": "finished", "test": "running"})
-        assert orch._derive_current_phase(steps, {}) == "test"
-
     def test_implement_running_returns_implement(self):
-        steps = self._make_steps({"plan": "finished", "test": "finished", "implement": "running"})
+        steps = self._make_steps({"plan": "finished", "implement": "running"})
         assert orch._derive_current_phase(steps, {}) == "implement"
 
     def test_review_running_returns_review_lint(self):
-        steps = self._make_steps(
-            {"plan": "finished", "test": "finished", "implement": "finished", "review": "running"}
-        )
+        steps = self._make_steps({"plan": "finished", "implement": "finished", "review": "running"})
         assert orch._derive_current_phase(steps, {}) == "review_lint"
 
     def test_review_finished_approved_returns_complete(self):
         steps = self._make_steps(
-            {"plan": "finished", "test": "finished", "implement": "finished", "review": "finished"}
+            {"plan": "finished", "implement": "finished", "review": "finished"}
         )
         assert orch._derive_current_phase(steps, {"status": "approved"}) == "complete"
 
     def test_review_finished_rejected_returns_failed(self):
         steps = self._make_steps(
-            {"plan": "finished", "test": "finished", "implement": "finished", "review": "finished"}
+            {"plan": "finished", "implement": "finished", "review": "finished"}
         )
         assert orch._derive_current_phase(steps, {"status": "rejected"}) == "failed"
 

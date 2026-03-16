@@ -19,7 +19,7 @@ def load_prompt(agent_name: str) -> str:
 
 class AgentInstruction(BaseModel):
     """
-    Returned by every MCP tool.  Claude CLI reads this and acts on it directly
+    Returned by agent builders.  Claude CLI reads this and acts on it directly
     — no external API call is made by the server.
     """
     agent: str
@@ -27,7 +27,7 @@ class AgentInstruction(BaseModel):
     user_message: str
     action_required: str
     session_id: str
-    step: str  # 'plan' | 'test' | 'implement' | 'review'
+    step: str  # 'plan' | 'implement' | 'review'
     context: dict[str, Any] = {}
 
 
@@ -61,8 +61,9 @@ class TesterOutput(BaseModel):
 
 
 class DevInput(BaseModel):
-    test_code: str
-    test_file_path: str
+    plan: dict[str, Any] = {}
+    test_code: str = ""           # populated on retry cycles that still have a failing test
+    test_file_path: str = ""
     error_output: str = ""
     existing_code: dict[str, str] = {}
     project_context: str = ""
@@ -129,21 +130,21 @@ class PhaseInstruction(BaseModel):
     Returned by execute_autonomous_task and advance_task.
 
     Claude CLI must:
-      1. Execute system_prompt + user_message using its own reasoning.
-      2. Produce a JSON result that matches output_schema.
-      3. Call advance_task(session_id, current_phase, result) immediately.
-      4. Repeat until is_terminal=True.
+      1. Read system_prompt to adopt the correct agent persona.
+      2. Execute task_instructions using its own reasoning.
+      3. Produce a JSON result that strictly matches output_schema.
+      4. Call advance_task(session_id, current_phase, result) immediately.
+      5. Repeat until is_terminal=True.
     """
 
     session_id: str
-    current_phase: str  # plan|test|implement|review_lint|review_arch|review_final|complete|failed
+    current_phase: str  # plan|implement|review_lint|review_arch|review_final|complete|failed
     system_prompt: str
-    user_message: str
-    action_required: str
-    output_schema: dict[str, Any]  # model_json_schema() of the expected result type
+    task_instructions: str          # unified prompt: context + what to do + output contract
+    output_schema: dict[str, Any]   # model_json_schema() of the expected result type
     retry_count: int = 0
-    context: dict[str, Any] = {}  # injected lessons_learned from previous retries
-    is_terminal: bool = False  # True for complete/failed — stop the loop
+    context: dict[str, Any] = {}    # injected lessons_learned from previous retries
+    is_terminal: bool = False       # True for complete/failed — stop the loop
 
     @field_validator("output_schema", mode="before")
     @classmethod

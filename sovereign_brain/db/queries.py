@@ -199,7 +199,6 @@ async def create_session_steps(
         """,
         [
             (step_ids["plan"],      session_id, "plan"),
-            (step_ids["test"],      session_id, "test"),
             (step_ids["implement"], session_id, "implement"),
             (step_ids["review"],    session_id, "review"),
         ],
