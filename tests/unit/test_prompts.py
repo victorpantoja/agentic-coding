@@ -4,8 +4,7 @@ import pytest
 
 from sovereign_brain.agents.base import load_prompt
 
-
-AGENT_NAMES = ["architect", "tester", "dev", "reviewer"]
+AGENT_NAMES = ["architect", "tester", "dev", "reviewer", "lint_agent", "architecture_agent"]
 
 
 @pytest.mark.parametrize("agent_name", AGENT_NAMES)
@@ -44,3 +43,33 @@ def test_dev_prompt_mentions_green_phase():
 def test_reviewer_prompt_mentions_vibe():
     prompt = load_prompt("reviewer")
     assert "vibe" in prompt.lower()
+
+
+def test_lint_agent_prompt_mentions_ruff():
+    prompt = load_prompt("lint_agent")
+    assert "ruff" in prompt.lower()
+
+
+def test_lint_agent_prompt_mentions_raw_output():
+    prompt = load_prompt("lint_agent")
+    assert "raw" in prompt.lower() or "verbatim" in prompt.lower()
+
+
+def test_lint_agent_prompt_mentions_mypy():
+    prompt = load_prompt("lint_agent")
+    assert "mypy" in prompt.lower()
+
+
+def test_architecture_agent_prompt_mentions_solid():
+    prompt = load_prompt("architecture_agent")
+    assert "SOLID" in prompt or "solid" in prompt.lower()
+
+
+def test_architecture_agent_prompt_mentions_ddd():
+    prompt = load_prompt("architecture_agent")
+    assert "DDD" in prompt or "domain" in prompt.lower()
+
+
+def test_architecture_agent_prompt_mentions_uuidv7():
+    prompt = load_prompt("architecture_agent")
+    assert "UUIDv7" in prompt or "uuid7" in prompt

@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
-from uuid import UUID
 
 import asyncpg
-
 
 # ── Sessions ─────────────────────────────────────────────────────────────────
 
@@ -295,3 +292,66 @@ async def get_session_steps(
         session_id,
     )
     return [dict(r) for r in rows]
+
+
+# ── Task history ──────────────────────────────────────────────────────────────
+
+async def log_task_history(
+    conn: asyncpg.Connection,
+    session_id: str,
+    iteration: int,
+    *,
+    reviewer_critique: str = "",
+    diff: str = "",
+    lint_output: dict | None = None,
+    arch_output: dict | None = None,
+    is_approved: bool = False,
+    lessons_learned: str = "",
+) -> None:
+    """Insert or ignore a task_history row (idempotent via ON CONFLICT DO NOTHING)."""
+    await conn.execute(
+        """
+        INSERT INTO task_history
+            (session_id, iteration, reviewer_critique, diff,
+             lint_output, arch_output, is_approved, lessons_learned)
+        VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
+        ON CONFLICT (session_id, iteration) DO NOTHING
+        """,
+        session_id,
+        iteration,
+        reviewer_critique,
+        diff,
+        json.dumps(lint_output or {}),
+        json.dumps(arch_output or {}),
+        is_approved,
+        lessons_learned,
+    )
+
+
+async def get_task_history(
+    conn: asyncpg.Connection,
+    session_id: str,
+) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        SELECT iteration, reviewer_critique, diff,
+               lint_output, arch_output, is_approved, lessons_learned, created_at
+        FROM task_history
+        WHERE session_id = $1::uuid
+        ORDER BY iteration ASC
+        """,
+        session_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_session_retry_count(
+    conn: asyncpg.Connection,
+    session_id: str,
+) -> int:
+    """Return the number of rejected review iterations logged for this session."""
+    row = await conn.fetchrow(
+        "SELECT COUNT(*) AS cnt FROM task_history WHERE session_id = $1::uuid",
+        session_id,
+    )
+    return int(row["cnt"]) if row else 0

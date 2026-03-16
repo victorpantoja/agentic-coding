@@ -1,6 +1,5 @@
 """Architect agent — structural planning, DDD/UUIDv7 enforcement."""
 
-import json
 
 from sovereign_brain.agents.base import (
     AgentInstruction,

@@ -1,7 +1,8 @@
 """Base utilities: prompt loading, input/output models, shared types."""
 
 from pathlib import Path
-from pydantic import BaseModel
+
+from pydantic import BaseModel, field_validator
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -86,3 +87,64 @@ class ReviewerOutput(BaseModel):
     vibe_score: int = 8
     vibe_notes: str = ""
     required_changes: list[str] = []
+
+
+# ── Autonomous orchestrator models ────────────────────────────────────────────
+
+class LintResult(BaseModel):
+    """Produced by Claude acting as LintAgent (review_lint phase)."""
+
+    passed: bool
+    issues: list[str] = []
+    raw_ruff_output: str  # full terminal output verbatim — required even when clean
+    raw_mypy_output: str  # full terminal output verbatim — required even when clean
+
+
+class ArchitectureResult(BaseModel):
+    """Produced by Claude acting as ArchitectureAgent (review_arch phase)."""
+
+    passed: bool
+    violations: list[str] = []
+    notes: str = ""
+    raw_analysis: str = ""  # full reasoning — allows Dev agent to parse tracebacks
+
+
+class IterationLog(BaseModel):
+    """One Dev→Reviewer cycle stored in task_history."""
+
+    iteration: int
+    reviewer_critique: str
+    diff: str
+    lint_passed: bool
+    arch_passed: bool
+    is_approved: bool
+    lessons_learned: str  # single-sentence distillation for context injection
+
+
+class PhaseInstruction(BaseModel):
+    """
+    Returned by execute_autonomous_task and advance_task.
+
+    Claude CLI must:
+      1. Execute system_prompt + user_message using its own reasoning.
+      2. Produce a JSON result that matches output_schema.
+      3. Call advance_task(session_id, current_phase, result) immediately.
+      4. Repeat until is_terminal=True.
+    """
+
+    session_id: str
+    current_phase: str  # plan|test|implement|review_lint|review_arch|review_final|complete|failed
+    system_prompt: str
+    user_message: str
+    action_required: str
+    output_schema: dict  # model_json_schema() of the expected result type
+    retry_count: int = 0
+    context: dict = {}  # injected lessons_learned from previous retries
+    is_terminal: bool = False  # True for complete/failed — stop the loop
+
+    @field_validator("output_schema", mode="before")
+    @classmethod
+    def ensure_schema_populated(cls, v: dict) -> dict:
+        if not v:
+            raise ValueError("output_schema must be populated via model_json_schema()")
+        return v
