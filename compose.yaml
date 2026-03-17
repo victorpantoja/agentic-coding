@@ -15,6 +15,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - default
+      - sovereign-net
 
   migrate:
     container_name: sovereign-brain-migrate
@@ -50,3 +53,8 @@ services:
 
 volumes:
   postgres_data:
+
+networks:
+  sovereign-net:
+    external: true
+    name: sovereign-net
