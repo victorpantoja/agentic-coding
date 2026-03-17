@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import asyncpg
 
@@ -198,7 +199,6 @@ async def create_session_steps(
         """,
         [
             (step_ids["plan"],      session_id, "plan"),
-            (step_ids["test"],      session_id, "test"),
             (step_ids["implement"], session_id, "implement"),
             (step_ids["review"],    session_id, "review"),
         ],
@@ -298,25 +298,30 @@ async def get_session_steps(
 
 async def log_task_history(
     conn: asyncpg.Connection,
+    history_id: str,
     session_id: str,
     iteration: int,
     *,
     reviewer_critique: str = "",
     diff: str = "",
-    lint_output: dict | None = None,
-    arch_output: dict | None = None,
+    lint_output: dict[str, Any] | None = None,
+    arch_output: dict[str, Any] | None = None,
     is_approved: bool = False,
     lessons_learned: str = "",
 ) -> None:
-    """Insert or ignore a task_history row (idempotent via ON CONFLICT DO NOTHING)."""
+    """Insert or ignore a task_history row (idempotent via ON CONFLICT DO NOTHING).
+
+    history_id must be a UUIDv7 string supplied by the caller — never generated here.
+    """
     await conn.execute(
         """
         INSERT INTO task_history
-            (session_id, iteration, reviewer_critique, diff,
+            (id, session_id, iteration, reviewer_critique, diff,
              lint_output, arch_output, is_approved, lessons_learned)
-        VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
+        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
         ON CONFLICT (session_id, iteration) DO NOTHING
         """,
+        history_id,
         session_id,
         iteration,
         reviewer_critique,

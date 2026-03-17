@@ -68,18 +68,23 @@ class TestBuildLintInstruction:
         assert "passed" in schema.get("properties", {})
         assert "raw_ruff_output" in schema.get("properties", {})
 
-    def test_action_required_mentions_ruff(self):
+    def test_task_instructions_mentions_ruff(self):
         instr = self._make()
-        assert "ruff" in instr.action_required
+        assert "ruff" in instr.task_instructions
+
+    def test_task_instructions_mentions_mypy_strict(self):
+        instr = self._make()
+        assert "mypy" in instr.task_instructions
+        assert "--strict" in instr.task_instructions
 
     def test_retry_context_injected_when_retry(self):
         instr = self._make(retry_count=2)
-        assert "retry" in instr.user_message.lower() or "2" in instr.user_message
+        assert "retry" in instr.task_instructions.lower() or "2" in instr.task_instructions
         assert instr.retry_count == 2
 
-    def test_changed_files_in_user_message(self):
+    def test_changed_files_in_task_instructions(self):
         instr = self._make()
-        assert "sovereign_brain/health.py" in instr.user_message
+        assert "sovereign_brain/health.py" in instr.task_instructions
 
     def test_system_prompt_loaded(self):
         instr = self._make()
@@ -110,13 +115,18 @@ class TestBuildArchInstruction:
         assert "passed" in schema.get("properties", {})
         assert "violations" in schema.get("properties", {})
 
-    def test_lint_summary_in_user_message(self):
+    def test_lint_summary_in_task_instructions(self):
         instr = self._make()
-        assert "passed=True" in instr.user_message or "passed" in instr.user_message
+        assert "passed=True" in instr.task_instructions or "passed" in instr.task_instructions
 
-    def test_plan_in_user_message_when_provided(self):
+    def test_plan_in_task_instructions_when_provided(self):
         instr = self._make()
-        assert "architecture_plan" in instr.user_message
+        assert "architecture_plan" in instr.task_instructions
+
+    def test_db_boundary_rule_in_task_instructions(self):
+        instr = self._make()
+        assert "db/" in instr.task_instructions
+        assert "mcp/" in instr.task_instructions
 
     def test_system_prompt_loaded(self):
         instr = self._make()
@@ -155,27 +165,28 @@ class TestBuildManagerInstruction:
         assert "approved" in schema.get("properties", {})
         assert "required_changes" in schema.get("properties", {})
 
-    def test_hard_gate_rule_in_user_message(self):
+    def test_hard_gate_rule_in_task_instructions(self):
         instr = self._make()
-        assert "Hard Gate" in instr.user_message
-        assert "approved=false" in instr.user_message.lower() or "approved" in instr.user_message
+        assert "Hard Gate" in instr.task_instructions
+        ti = instr.task_instructions.lower()
+        assert "approved=false" in ti or "approved" in ti
 
     def test_lint_passed_status_shown(self):
         instr = self._make(lint=LINT_RESULT_FAIL)
-        assert "False" in instr.user_message or "false" in instr.user_message.lower()
+        assert "False" in instr.task_instructions or "false" in instr.task_instructions.lower()
 
     def test_arch_passed_status_shown(self):
         instr = self._make(arch=ARCH_RESULT_FAIL)
-        assert "False" in instr.user_message or "false" in instr.user_message.lower()
+        assert "False" in instr.task_instructions or "false" in instr.task_instructions.lower()
 
     def test_both_reports_embedded(self):
         instr = self._make()
-        assert "LintAgent Report" in instr.user_message
-        assert "ArchitectureAgent Report" in instr.user_message
+        assert "LintAgent Report" in instr.task_instructions
+        assert "ArchitectureAgent Report" in instr.task_instructions
 
-    def test_action_required_mentions_hard_gate(self):
+    def test_task_instructions_mentions_hard_gate(self):
         instr = self._make()
-        assert "Hard Gate" in instr.action_required or "approved=false" in instr.action_required
+        assert "Hard Gate" in instr.task_instructions or "approved=false" in instr.task_instructions
 
 
 class TestBackwardCompatBuildInstruction:
